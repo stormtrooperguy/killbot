@@ -7,7 +7,7 @@ serves an admin web UI.
 
 | Part | Pin | Notes |
 |------|-----|-------|
-| WS2812B strip, 45 LEDs (the eye) | GPIO 13 (D13) | Solid red at boot |
+| WS2812B strip, 46 LEDs (the eye) | GPIO 13 (D13) | Solid red at boot |
 
 ## Setup
 
@@ -23,7 +23,10 @@ serves an admin web UI.
 
 ## Admin UI
 
+- **CONVERGE** button: two white comets chase in from both ends of the eye
+  over the red, meet in the middle, then the eye flashes white twice and
+  returns to red. Re-presses during the animation are ignored.
 - **Eye** toggle: turns the eye LEDs on/off. State is pushed live to all open
   pages via server-sent events (`/events`).
 
-Actions are plain GETs to `/a/<action>` (e.g. `/a/eye` toggles the eye).
+Actions are plain GETs to `/a/<action>` (`/a/eye` toggles the eye, `/a/animate` runs the converge animation).

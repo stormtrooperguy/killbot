@@ -1,6 +1,6 @@
 /*
   Killbot Controller
-  ESP32 firmware: a 45-LED WS2812B strip forms the robot's eye (solid red).
+  ESP32 firmware: a 46-LED WS2812B strip forms the robot's eye (solid red).
   Runs as its own WiFi AP and serves an admin web UI for control.
 */
 
@@ -23,12 +23,28 @@ const char* mdns_host   = "killbot";   // reachable at http://killbot.local
 // Eye LEDs
 // ---------------------------------------------------------------------------
 #define LED_PIN     13
-#define NUM_LEDS    45
+#define NUM_LEDS    46
 #define BRIGHTNESS  200
 const CRGB EYE_COLOR = CRGB::Red;
 
 CRGB leds[NUM_LEDS];
 bool eyeOn = true;
+
+// ---------------------------------------------------------------------------
+// Converge animation: two white comets start at the far ends and chase
+// toward the center over the red eye, then the whole eye double-flashes
+// white and returns to red.
+// ---------------------------------------------------------------------------
+#define COMET_TAIL      4     // LEDs of fading tail behind each comet head
+#define COMET_STEP_MS   25    // time per LED of comet travel
+#define FLASH_ON_MS     80
+#define FLASH_OFF_MS    80
+#define FLASH_COUNT     2
+
+enum AnimPhase { ANIM_IDLE, ANIM_COMET, ANIM_FLASH };
+AnimPhase animPhase = ANIM_IDLE;
+int animStep = 0;                 // comet head position, or flash half-cycle index
+unsigned long animNextMs = 0;
 
 // ---------------------------------------------------------------------------
 // Action queue: async web handlers run on the AsyncTCP task, so they only
@@ -51,12 +67,68 @@ void applyEye() {
     FastLED.show();
 }
 
+void pushStatus();
+
+// Draw one frame of the comets with heads at `head` and its mirror
+void drawComets(int head) {
+    fill_solid(leds, NUM_LEDS, EYE_COLOR);
+    for (int k = 0; k <= COMET_TAIL; k++) {
+        int pos = head - k;
+        if (pos < 0) break;
+        // Head is full white; tail fades back to the red underneath
+        uint8_t amt = 255 - (255 * k) / (COMET_TAIL + 1);
+        CRGB c = blend(EYE_COLOR, CRGB::White, amt);
+        leds[pos] = c;
+        leds[NUM_LEDS - 1 - pos] = c;
+    }
+    FastLED.show();
+}
+
+void startAnimation() {
+    animPhase  = ANIM_COMET;
+    animStep   = 0;
+    animNextMs = millis();
+    Serial.println("Animation: converge");
+}
+
+// Advance the animation state machine; called every loop()
+void updateAnimation() {
+    if (animPhase == ANIM_IDLE) return;
+    unsigned long now = millis();
+    if ((long)(now - animNextMs) < 0) return;
+
+    if (animPhase == ANIM_COMET) {
+        // Heads meet at the center LED (or the middle pair for even counts)
+        const int center = (NUM_LEDS - 1) / 2;
+        drawComets(animStep);
+        animNextMs = now + COMET_STEP_MS;
+        if (++animStep > center) {
+            animPhase = ANIM_FLASH;
+            animStep  = 0;
+        }
+    } else {  // ANIM_FLASH: even steps = white, odd steps = red
+        if (animStep >= FLASH_COUNT * 2) {
+            animPhase = ANIM_IDLE;
+            applyEye();
+            pushStatus();
+            return;
+        }
+        bool white = (animStep % 2) == 0;
+        fill_solid(leds, NUM_LEDS, white ? CRGB::White : EYE_COLOR);
+        FastLED.show();
+        animNextMs = now + (white ? FLASH_ON_MS : FLASH_OFF_MS);
+        animStep++;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Status push (SSE)
 // ---------------------------------------------------------------------------
 void buildStatusJson(String &out) {
     out = "{\"eyeOn\":";
     out += eyeOn ? "true" : "false";
+    out += ",\"animating\":";
+    out += animPhase != ANIM_IDLE ? "true" : "false";
     out += "}";
 }
 
@@ -72,8 +144,11 @@ void pushStatus() {
 void dispatchAction(const char *path) {
     if (strcmp(path, "eye") == 0) {
         eyeOn = !eyeOn;
-        applyEye();
+        if (animPhase == ANIM_IDLE) applyEye();   // else applied when animation ends
         Serial.printf("Eye %s\n", eyeOn ? "ON" : "OFF");
+    } else if (strcmp(path, "animate") == 0) {
+        if (animPhase != ANIM_IDLE) return;       // ignore re-triggers mid-animation
+        startAnimation();
     } else {
         Serial.printf("Unknown action: %s\n", path);
         return;
@@ -96,6 +171,13 @@ void buildPageHtml(String &out) {
           "body { background:#1a1a1a; color:#fff; padding:11px; padding-bottom:84px; }"
           "h1 { text-align:center; margin-bottom:15px; font-size:24px; }"
           "h2 { text-align:center; margin:15px 0 8px; font-size:17px; color:#aaa; }"
+          ".action-wrap { max-width:800px; margin:0 auto 15px; display:flex; justify-content:center; }"
+          ".btn-action { width:200px; height:200px; border:none; border-radius:50%; background:#c0392b;"
+          "color:#fff; font-family:inherit; font-size:22px; font-weight:bold; cursor:pointer;"
+          "transition:all .2s; box-shadow:0 4px 8px rgba(0,0,0,.4); -webkit-tap-highlight-color:transparent; }"
+          ".btn-action:hover { transform:translateY(-2px); box-shadow:0 6px 12px rgba(0,0,0,.5); opacity:.9; }"
+          ".btn-action:active { transform:translateY(0); box-shadow:0 2px 4px rgba(0,0,0,.3); }"
+          ".btn-action.busy { background:#eee; color:#c0392b; }"
           ".toggle-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));"
           "gap:8px; max-width:800px; margin:0 auto 15px; }"
           ".toggle { background-color:#2a2a2a; border:1px solid #444; border-radius:6px; padding:12px 16px;"
@@ -121,6 +203,10 @@ void buildPageHtml(String &out) {
           "</style></head>"
           "<body><h1>Killbot</h1>";
 
+    out += "<h2>Actions</h2><div class=\"action-wrap\">"
+           "<button class=\"btn-action\" id=\"btn-anim\" onclick=\"t('animate')\">CONVERGE</button>"
+           "</div>";
+
     out += "<h2>Toggles</h2><div class=\"toggle-grid\">"
            "<div class=\"toggle on\" id=\"tog-eye\" onclick=\"t('eye')\">"
            "<span>Eye</span><span class=\"toggle-switch\"></span>"
@@ -132,13 +218,16 @@ void buildPageHtml(String &out) {
     out += ap_ssid;
     out += " (192.168.4.1)</div>"
            "<div class=\"status-item\"><strong>Eye:</strong> <span id=\"eye\">&mdash;</span></div>"
+           "<div class=\"status-item\"><strong>Animation:</strong> <span id=\"anim\">&mdash;</span></div>"
            "</div></div>";
 
     // Embedded JS: SSE for live status pushes, fire-and-forget action triggers
     out += "<script>"
            "function r(d){if(!d)return;"
            "document.getElementById('eye').textContent=d.eyeOn?'On':'Off';"
-           "document.getElementById('tog-eye').classList.toggle('on',!!d.eyeOn);}"
+           "document.getElementById('tog-eye').classList.toggle('on',!!d.eyeOn);"
+           "document.getElementById('anim').textContent=d.animating?'Running':'Idle';"
+           "document.getElementById('btn-anim').classList.toggle('busy',!!d.animating);}"
            "async function t(p){try{await fetch('/a/'+p);}catch(e){}}"
            "const es=new EventSource('/events');"
            "es.onmessage=e=>{try{r(JSON.parse(e.data));}catch(err){}};"
@@ -227,6 +316,8 @@ void loop() {
             dispatchAction(msg.path);
         }
     }
+
+    updateAnimation();
 
     delay(2);
 }
