@@ -24,8 +24,14 @@ const char* mdns_host   = "killbot";   // reachable at http://killbot.local
 // ---------------------------------------------------------------------------
 #define LED_PIN     13
 #define NUM_LEDS    46
-#define BRIGHTNESS  200
-const CRGB EYE_COLOR = CRGB::Red;
+
+// Master brightness stays at full scale so the animation's white hits maximum
+// output; the resting red is dimmed in the color itself instead. Tune RED_LEVEL
+// (0-255) to change how bright the idle eye sits without touching the white.
+#define BRIGHTNESS  255
+#define RED_LEVEL   150
+const CRGB EYE_COLOR   = CRGB(RED_LEVEL, 0, 0);
+const CRGB FLASH_COLOR = CRGB::White;
 
 CRGB leds[NUM_LEDS];
 bool eyeOn = true;
@@ -50,6 +56,9 @@ unsigned long animNextMs = 0;
 // Action queue: async web handlers run on the AsyncTCP task, so they only
 // enqueue a path here; loop() drains the queue and does the real work.
 // ---------------------------------------------------------------------------
+#define SSE_HEARTBEAT_MS   3000   // status re-push interval; also reaps dead SSE clients
+unsigned long nextHeartbeatMs = 0;
+
 #define ACTION_PATH_MAX    32
 #define ACTION_QUEUE_DEPTH 8
 struct ActionMsg { char path[ACTION_PATH_MAX]; };
@@ -77,7 +86,7 @@ void drawComets(int head) {
         if (pos < 0) break;
         // Head is full white; tail fades back to the red underneath
         uint8_t amt = 255 - (255 * k) / (COMET_TAIL + 1);
-        CRGB c = blend(EYE_COLOR, CRGB::White, amt);
+        CRGB c = blend(EYE_COLOR, FLASH_COLOR, amt);
         leds[pos] = c;
         leds[NUM_LEDS - 1 - pos] = c;
     }
@@ -88,7 +97,7 @@ void startAnimation() {
     animPhase  = ANIM_COMET;
     animStep   = 0;
     animNextMs = millis();
-    Serial.println("Animation: converge");
+    Serial.println("Laser: fire");
 }
 
 // Advance the animation state machine; called every loop()
@@ -114,7 +123,7 @@ void updateAnimation() {
             return;
         }
         bool white = (animStep % 2) == 0;
-        fill_solid(leds, NUM_LEDS, white ? CRGB::White : EYE_COLOR);
+        fill_solid(leds, NUM_LEDS, white ? FLASH_COLOR : EYE_COLOR);
         FastLED.show();
         animNextMs = now + (white ? FLASH_ON_MS : FLASH_OFF_MS);
         animStep++;
@@ -146,7 +155,7 @@ void dispatchAction(const char *path) {
         eyeOn = !eyeOn;
         if (animPhase == ANIM_IDLE) applyEye();   // else applied when animation ends
         Serial.printf("Eye %s\n", eyeOn ? "ON" : "OFF");
-    } else if (strcmp(path, "animate") == 0) {
+    } else if (strcmp(path, "laser") == 0) {
         if (animPhase != ANIM_IDLE) return;       // ignore re-triggers mid-animation
         startAnimation();
     } else {
@@ -204,7 +213,7 @@ void buildPageHtml(String &out) {
           "<body><h1>Killbot</h1>";
 
     out += "<h2>Actions</h2><div class=\"action-wrap\">"
-           "<button class=\"btn-action\" id=\"btn-anim\" onclick=\"t('animate')\">CONVERGE</button>"
+           "<button class=\"btn-action\" id=\"btn-anim\" onclick=\"t('laser')\">LASER</button>"
            "</div>";
 
     out += "<h2>Toggles</h2><div class=\"toggle-grid\">"
@@ -218,7 +227,7 @@ void buildPageHtml(String &out) {
     out += ap_ssid;
     out += " (192.168.4.1)</div>"
            "<div class=\"status-item\"><strong>Eye:</strong> <span id=\"eye\">&mdash;</span></div>"
-           "<div class=\"status-item\"><strong>Animation:</strong> <span id=\"anim\">&mdash;</span></div>"
+           "<div class=\"status-item\"><strong>Laser:</strong> <span id=\"anim\">&mdash;</span></div>"
            "</div></div>";
 
     // Embedded JS: SSE for live status pushes, fire-and-forget action triggers
@@ -226,7 +235,7 @@ void buildPageHtml(String &out) {
            "function r(d){if(!d)return;"
            "document.getElementById('eye').textContent=d.eyeOn?'On':'Off';"
            "document.getElementById('tog-eye').classList.toggle('on',!!d.eyeOn);"
-           "document.getElementById('anim').textContent=d.animating?'Running':'Idle';"
+           "document.getElementById('anim').textContent=d.animating?'Firing':'Idle';"
            "document.getElementById('btn-anim').classList.toggle('busy',!!d.animating);}"
            "async function t(p){try{await fetch('/a/'+p);}catch(e){}}"
            "const es=new EventSource('/events');"
@@ -289,6 +298,11 @@ void setup() {
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(ap_ssid, ap_password);
 
+    // Modem sleep adds tens to hundreds of ms of latency to inbound packets;
+    // this rig is mains/battery powered with no need to save radio power.
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+
     Serial.print("AP started: "); Serial.println(ap_ssid);
     Serial.print("IP: ");         Serial.println(WiFi.softAPIP());
 
@@ -318,6 +332,12 @@ void loop() {
     }
 
     updateAnimation();
+
+    unsigned long now = millis();
+    if ((long)(now - nextHeartbeatMs) >= 0) {
+        nextHeartbeatMs = now + SSE_HEARTBEAT_MS;
+        pushStatus();
+    }
 
     delay(2);
 }
