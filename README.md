@@ -12,6 +12,18 @@ serves an admin web UI.
 Idle red brightness is set by `RED_LEVEL` in `src/main.cpp`; master brightness
 stays at 255 so the animation's white flash runs at full output.
 
+## WiFi channel
+
+`WIFI_CHANNEL` in `src/main.cpp` sets the AP's 2.4GHz channel (default 11).
+Use only **1, 6 or 11** — they are the only non-overlapping channels, and a
+partially overlapping channel is worse than sharing a busy one. Channels 12-14
+are restricted in some regions and may stop clients associating.
+
+To judge a venue on site, set `CHANNEL_SCAN_ON_BOOT` to 1, flash, and read the
+serial log: it lists how many APs are on each channel and the strongest signal
+on each, so you can pick the quietest of 1/6/11. Set it back to 0 afterwards —
+it adds about 2s to boot.
+
 ## Setup
 
 1. Copy `src/secrets.h.example` to `src/secrets.h` and fill in the AP SSID and

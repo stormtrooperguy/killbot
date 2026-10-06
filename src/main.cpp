@@ -20,6 +20,23 @@ const char* ap_ssid     = AP_SSID;
 const char* ap_password = AP_PASSWORD;
 const char* mdns_host   = "killbot";   // reachable at http://killbot.local
 
+// 2.4GHz channel for the AP. Use ONLY 1, 6 or 11 -- these are the three
+// non-overlapping channels. An "uncommon" channel like 3 or 9 partially
+// overlaps two of them, and partial overlap is worse than sharing: co-channel
+// neighbors take turns via CSMA, while an overlapping one is unparseable noise
+// that nobody defers to. 12-14 are restricted in the US and some clients will
+// not associate at all. 11 is the default here because consumer gear ships on
+// 1 and 6, so 11 is usually the quietest of the three.
+//
+// If this rig ever gains an AP+STA device (as in the springtrap/cupcake pair),
+// every radio in the group must share this channel.
+#define WIFI_CHANNEL 11
+
+// Set to 1 to scan the band at boot and log how many APs sit on each channel,
+// then pick the quietest of 1/6/11 for WIFI_CHANNEL above. Costs ~2s of boot
+// time and briefly enables station mode, so leave it off in normal operation.
+#define CHANNEL_SCAN_ON_BOOT 0
+
 // ---------------------------------------------------------------------------
 // Eye LEDs
 // ---------------------------------------------------------------------------
@@ -329,14 +346,40 @@ void setup() {
 
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(ap_ip, ap_ip, subnet);
-    WiFi.softAP(ap_ssid, ap_password);
+#if CHANNEL_SCAN_ON_BOOT
+    // Survey the band before bringing up the AP: counts per channel, plus the
+    // strongest neighbor on each, so a crowded venue can be judged on site.
+    Serial.println("Scanning 2.4GHz band (~2s)...");
+    WiFi.mode(WIFI_STA);
+    int found = WiFi.scanNetworks();
+    int perChannel[14] = {0};
+    int strongest[14];
+    for (int i = 0; i < 14; i++) strongest[i] = -127;
+    for (int i = 0; i < found; i++) {
+        int ch = WiFi.channel(i);
+        if (ch >= 1 && ch <= 13) {
+            perChannel[ch]++;
+            if (WiFi.RSSI(i) > strongest[ch]) strongest[ch] = WiFi.RSSI(i);
+        }
+    }
+    Serial.printf("%d networks found\n", found);
+    for (int ch = 1; ch <= 13; ch++) {
+        Serial.printf("  ch %2d: %2d AP(s)%s%s\n", ch, perChannel[ch],
+                      perChannel[ch] ? String(", strongest " + String(strongest[ch]) + " dBm").c_str() : "",
+                      (ch == 1 || ch == 6 || ch == 11) ? "   <- non-overlapping" : "");
+    }
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_AP);
+#endif
+
+    WiFi.softAP(ap_ssid, ap_password, WIFI_CHANNEL);
 
     // Modem sleep adds tens to hundreds of ms of latency to inbound packets;
     // this rig is mains/battery powered with no need to save radio power.
     WiFi.setSleep(false);
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
-    Serial.print("AP started: "); Serial.println(ap_ssid);
+    Serial.printf("AP started: %s (channel %d)\n", ap_ssid, WIFI_CHANNEL);
     Serial.print("IP: ");         Serial.println(WiFi.softAPIP());
 
     if (MDNS.begin(mdns_host)) {
