@@ -8,9 +8,12 @@ serves an admin web UI.
 | Part | Pin | Notes |
 |------|-----|-------|
 | WS2812B strip, 46 LEDs (the eye) | GPIO 13 (D13) | Solid red at boot |
+| WS2812B ring, 7 pixels (headlamp) | GPIO 27 | Amber, dark at boot |
 
-Idle red brightness is set by `RED_LEVEL` in `src/main.cpp`; master brightness
-stays at 255 so the animation's white flash runs at full output.
+Idle red brightness is set by `RED_LEVEL` in `src/main.cpp` and the headlamp by
+`RING_LEVEL` (both default 150, same scale). Master brightness stays at 255 so
+the animation's white flash runs at full output. `AMBER_BASE` sets the headlamp
+hue — lower its green term for deeper orange, raise it for yellower amber.
 
 ## WiFi channel
 
@@ -47,7 +50,11 @@ which makes the admin page stop responding.
 - **LASER** button: two white comets chase in from both ends of the eye
   over the red, meet in the middle, then the eye flashes white twice and
   returns to red. Re-presses during the animation are ignored.
-- **Eye** toggle: turns the eye LEDs on/off. State is pushed live to all open
-  pages via server-sent events (`/events`).
+- **Eye** toggle: turns the eye LEDs on/off.
+- **Headlamp** toggle: turns the amber ring on/off. Independent of the eye and
+  of the laser animation.
 
-Actions are plain GETs to `/a/<action>` (`/a/eye` toggles the eye, `/a/laser` fires the laser animation).
+Toggle state is pushed live to all open pages via server-sent events
+(`/events`).
+
+Actions are plain GETs to `/a/<action>` (`/a/eye`, `/a/headlamp`, `/a/laser`).

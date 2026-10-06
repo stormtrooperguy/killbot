@@ -1,6 +1,7 @@
 /*
   Killbot Controller
-  ESP32 firmware: a 46-LED WS2812B strip forms the robot's eye (solid red).
+  ESP32 firmware: a 46-LED WS2812B strip forms the robot's eye (solid red) and
+  a 7-pixel ring is the headlamp (amber).
   Runs as its own WiFi AP and serves an admin web UI for control.
 */
 
@@ -55,6 +56,22 @@ CRGB leds[NUM_LEDS];
 bool eyeOn = true;
 
 // ---------------------------------------------------------------------------
+// Headlamp ring
+// ---------------------------------------------------------------------------
+#define RING_PIN    27        // plain output pin; avoid GPIO12 (flash-voltage strapping)
+#define RING_LEDS   7
+
+// AMBER_BASE is the hue at full output; RING_LEVEL scales it the same way
+// RED_LEVEL scales the eye (CRGB(150,0,0) == CRGB::Red.nscale8(150)), so both
+// levels mean the same thing and start at the same default. Nudge the green
+// term in AMBER_BASE toward 0 for a deeper orange, up for a yellower amber.
+#define RING_LEVEL  150
+const CRGB AMBER_BASE = CRGB(255, 120, 0);
+
+CRGB ring[RING_LEDS];
+bool headlampOn = false;      // dark at boot; the UI toggle lights it
+
+// ---------------------------------------------------------------------------
 // Converge animation: two white comets start at the far ends and chase
 // toward the center over the red eye, then the whole eye double-flashes
 // white and returns to red.
@@ -99,6 +116,13 @@ String pageHtml;
 // ---------------------------------------------------------------------------
 void applyEye() {
     fill_solid(leds, NUM_LEDS, eyeOn ? EYE_COLOR : CRGB::Black);
+    FastLED.show();
+}
+
+void applyHeadlamp() {
+    CRGB amber = AMBER_BASE;
+    amber.nscale8(RING_LEVEL);
+    fill_solid(ring, RING_LEDS, headlampOn ? amber : CRGB::Black);
     FastLED.show();
 }
 
@@ -162,6 +186,8 @@ void updateAnimation() {
 void buildStatusJson(String &out) {
     out = "{\"eyeOn\":";
     out += eyeOn ? "true" : "false";
+    out += ",\"headlampOn\":";
+    out += headlampOn ? "true" : "false";
     out += ",\"animating\":";
     out += animPhase != ANIM_IDLE ? "true" : "false";
     out += "}";
@@ -181,6 +207,10 @@ void dispatchAction(const char *path) {
         eyeOn = !eyeOn;
         if (animPhase == ANIM_IDLE) applyEye();   // else applied when animation ends
         Serial.printf("Eye %s\n", eyeOn ? "ON" : "OFF");
+    } else if (strcmp(path, "headlamp") == 0) {
+        headlampOn = !headlampOn;
+        applyHeadlamp();
+        Serial.printf("Headlamp %s\n", headlampOn ? "ON" : "OFF");
     } else if (strcmp(path, "laser") == 0) {
         if (animPhase != ANIM_IDLE) return;       // ignore re-triggers mid-animation
         startAnimation();
@@ -228,6 +258,8 @@ void buildPageHtml(String &out) {
           ".toggle.on { background-color:#3a1f1f; border-color:#e74c3c; }"
           ".toggle.on .toggle-switch { background:#e74c3c; }"
           ".toggle.on .toggle-switch::before { transform:translateX(18px); }"
+          ".toggle.amber.on { background-color:#3a2e1f; border-color:#f0a030; }"
+          ".toggle.amber.on .toggle-switch { background:#f0a030; }"
           ".status-bar { position:fixed; bottom:0; left:0; right:0; background:#2a2a2a;"
           "border-top:2px solid #444; padding:8px 11px; box-shadow:0 -2px 8px rgba(0,0,0,.5); }"
           ".status-bar h3 { margin:0 0 6px; font-size:11px; color:#888; text-align:center; }"
@@ -246,6 +278,9 @@ void buildPageHtml(String &out) {
            "<div class=\"toggle on\" id=\"tog-eye\" onclick=\"t('eye')\">"
            "<span>Eye</span><span class=\"toggle-switch\"></span>"
            "</div>"
+           "<div class=\"toggle amber\" id=\"tog-lamp\" onclick=\"t('headlamp')\">"
+           "<span>Headlamp</span><span class=\"toggle-switch\"></span>"
+           "</div>"
            "</div>";
 
     out += "<div class=\"status-bar\"><h3>System Status</h3><div class=\"status-grid\">"
@@ -253,6 +288,7 @@ void buildPageHtml(String &out) {
     out += ap_ssid;
     out += " (192.168.4.1)</div>"
            "<div class=\"status-item\"><strong>Eye:</strong> <span id=\"eye\">&mdash;</span></div>"
+           "<div class=\"status-item\"><strong>Headlamp:</strong> <span id=\"lamp\">&mdash;</span></div>"
            "<div class=\"status-item\"><strong>Laser:</strong> <span id=\"anim\">&mdash;</span></div>"
            "</div></div>";
 
@@ -261,6 +297,8 @@ void buildPageHtml(String &out) {
            "function r(d){if(!d)return;"
            "document.getElementById('eye').textContent=d.eyeOn?'On':'Off';"
            "document.getElementById('tog-eye').classList.toggle('on',!!d.eyeOn);"
+           "document.getElementById('lamp').textContent=d.headlampOn?'On':'Off';"
+           "document.getElementById('tog-lamp').classList.toggle('on',!!d.headlampOn);"
            "document.getElementById('anim').textContent=d.animating?'Firing':'Idle';"
            "document.getElementById('btn-anim').classList.toggle('busy',!!d.animating);}"
            "async function t(p){try{await fetch('/a/'+p);}catch(e){}}"
@@ -341,8 +379,10 @@ void setup() {
     actionQueue = xQueueCreate(ACTION_QUEUE_DEPTH, sizeof(ActionMsg));
 
     FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+    FastLED.addLeds<WS2812B, RING_PIN, GRB>(ring, RING_LEDS);
     FastLED.setBrightness(BRIGHTNESS);
-    applyEye();   // eye comes up solid red
+    applyEye();        // eye comes up solid red
+    applyHeadlamp();   // ring starts dark
 
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(ap_ip, ap_ip, subnet);
