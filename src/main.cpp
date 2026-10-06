@@ -10,6 +10,7 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
+#include <DNSServer.h>
 #include "secrets.h"
 
 // ---------------------------------------------------------------------------
@@ -63,6 +64,14 @@ unsigned long nextHeartbeatMs = 0;
 #define ACTION_QUEUE_DEPTH 8
 struct ActionMsg { char path[ACTION_PATH_MAX]; };
 QueueHandle_t actionQueue = NULL;
+
+// Captive-portal DNS: answers every lookup with our own AP address. Tablets
+// probe a connectivity-check URL over DNS when they join; if that lookup fails
+// the OS flags the network "no internet" and may drop back to cellular, after
+// which taps on the admin page go nowhere. Hijacking DNS lets us answer those
+// probes ourselves (see the handlers in setupWebServer) so the client stays put.
+DNSServer dnsServer;
+const IPAddress ap_ip(192, 168, 4, 1);
 
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
@@ -260,6 +269,28 @@ void setupWebServer() {
     });
     server.addHandler(&events);
 
+    // OS connectivity probes. Answering these the way each platform expects
+    // marks the network as working, so the client keeps using it instead of
+    // switching to cellular or nagging with a sign-in sheet.
+    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *req) {   // Android
+        req->send(204);
+    });
+    server.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *req) {        // Android (older)
+        req->send(204);
+    });
+    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *req) {   // iOS/macOS
+        req->send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    });
+    server.on("/library/test/success.html", HTTP_GET, [](AsyncWebServerRequest *req) {
+        req->send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    });
+    server.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *req) {       // Windows
+        req->send(200, "text/plain", "Microsoft NCSI");
+    });
+    server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *req) {
+        req->send(200, "text/plain", "Microsoft Connect Test");
+    });
+
     // /a/<path> action dispatcher — enqueue for loop() to execute
     server.onNotFound([](AsyncWebServerRequest *req) {
         const String &url = req->url();
@@ -271,6 +302,10 @@ void setupWebServer() {
                 xQueueSend(actionQueue, &msg, 0);  // non-blocking; drop if full
             }
             req->send(200, "text/plain", "OK");
+        } else if (req->method() == HTTP_GET) {
+            // Anything else that reached us via the DNS catch-all: point it at
+            // the admin page instead of a dead end.
+            req->redirect("http://192.168.4.1/");
         } else {
             req->send(404, "text/plain", "Not Found");
         }
@@ -292,10 +327,8 @@ void setup() {
     FastLED.setBrightness(BRIGHTNESS);
     applyEye();   // eye comes up solid red
 
-    IPAddress local_IP(192, 168, 4, 1);
-    IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
-    WiFi.softAPConfig(local_IP, gateway, subnet);
+    WiFi.softAPConfig(ap_ip, ap_ip, subnet);
     WiFi.softAP(ap_ssid, ap_password);
 
     // Modem sleep adds tens to hundreds of ms of latency to inbound packets;
@@ -312,6 +345,10 @@ void setup() {
     } else {
         Serial.println("mDNS init failed");
     }
+
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer.start(53, "*", ap_ip);
+    Serial.println("Captive-portal DNS started on port 53");
 
     buildPageHtml(pageHtml);   // static content, built once
     setupWebServer();
@@ -332,6 +369,7 @@ void loop() {
     }
 
     updateAnimation();
+    dnsServer.processNextRequest();
 
     unsigned long now = millis();
     if ((long)(now - nextHeartbeatMs) >= 0) {

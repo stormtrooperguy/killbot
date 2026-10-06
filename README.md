@@ -24,6 +24,12 @@ stays at 255 so the animation's white flash runs at full output.
 
 3. Join the configured AP and open http://192.168.4.1 (or http://killbot.local).
 
+A captive-portal DNS server answers every lookup with the AP's own address, and
+the OS connectivity-check URLs (`/generate_204`, `/hotspot-detect.html`,
+`/ncsi.txt`, ...) are answered as "online". Without this, phones and tablets flag
+the network as having no internet and may route traffic over cellular instead,
+which makes the admin page stop responding.
+
 ## Admin UI
 
 - **LASER** button: two white comets chase in from both ends of the eye
